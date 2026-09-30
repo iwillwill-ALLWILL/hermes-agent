@@ -48,6 +48,8 @@ def _run_switch(
     user_providers=None,
     custom_providers=None,
     validation=_ACCEPTED,
+    validation_side_effect=None,
+    explicit_provider=None,
     current_model="old-model",
     current_base_url="",
 ):
@@ -59,10 +61,14 @@ def _run_switch(
     resolution, normalization, and model metadata.  This isolates the new
     configured-provider detection step.
     """
+    validation_patch = (
+        patch("hermes_cli.models_validate.validate_requested_model", side_effect=validation_side_effect)
+        if validation_side_effect is not None else
+        patch("hermes_cli.models_validate.validate_requested_model", return_value=validation))
     with patch("hermes_cli.model_switch.resolve_alias", return_value=None), \
          patch("hermes_cli.model_switch.list_provider_models", return_value=[]), \
          patch("hermes_cli.model_switch.normalize_model_for_provider", side_effect=lambda model, provider: model), \
-         patch("hermes_cli.models_validate.validate_requested_model", return_value=validation), \
+         validation_patch, \
          patch("hermes_cli.models.detect_provider_for_model", return_value=None), \
          patch("hermes_cli.model_switch.get_model_info", return_value=None), \
          patch("hermes_cli.model_switch.get_model_capabilities", return_value=None), \
@@ -79,6 +85,7 @@ def _run_switch(
             current_provider=current_provider,
             current_model=current_model,
             current_base_url=current_base_url,
+            explicit_provider=explicit_provider or "",
             user_providers=user_providers or {},
             custom_providers=custom_providers or [],
         )
@@ -253,3 +260,48 @@ def test_raw_list_provider_key_with_different_credential_stays_ambiguous():
         custom_providers=raw)
     assert result.success is False
     assert "multiple configured providers" in (result.error_message or "")
+
+
+def test_settings_only_builtin_provider_preserves_native_identity():
+    """Settings-only ``providers.openai-codex`` (per-provider tuning: timeouts, stale thresholds)
+    must not shadow the built-in provider: the target validates as native ``openai-codex`` (OAuth
+    + curated catalog), never as ``custom:openai-codex`` whose ``/models`` probe against the OAuth
+    backend bricks the switch with "Model switch failed" (recurrence guard — this regression
+    resurfaced after a code update discarded the earlier uncommitted fix)."""
+    seen = []
+
+    def _validate(_model, provider, **_kwargs):
+        seen.append(provider)
+        return _ACCEPTED
+
+    result = _run_switch(
+        raw_input="gpt-6.1-s01",
+        current_provider="deepseek",
+        current_model="deepseek-v4-pro",
+        explicit_provider="openai-codex",
+        validation_side_effect=_validate,
+        user_providers={"openai-codex": {"request_timeout_seconds": 7200, "stale_timeout_seconds": 0}},
+    )
+    assert result.success is True, result.error_message
+    assert result.target_provider == "openai-codex"
+    assert seen == ["openai-codex"]
+
+
+def test_builtin_explicit_endpoint_override_still_validates_as_custom():
+    """Reverse control: an explicit ``base_url`` under a built-in key remains a deliberate custom
+    route and still validates as ``custom:openai-codex``."""
+    seen = []
+
+    def _validate(_model, provider, **_kwargs):
+        seen.append(provider)
+        return _ACCEPTED
+
+    result = _run_switch(
+        raw_input="private-model",
+        current_provider="deepseek",
+        explicit_provider="openai-codex",
+        validation_side_effect=_validate,
+        user_providers={"openai-codex": {"base_url": "https://relay.example/v1"}},
+    )
+    assert result.success is True, result.error_message
+    assert seen == ["custom:openai-codex"]

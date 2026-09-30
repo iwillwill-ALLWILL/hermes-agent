@@ -404,8 +404,19 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
     entry = user_config.get(name) if isinstance(user_config, dict) and user_config else None
     if not isinstance(entry, dict):
         return None
+    endpoint = entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or ""
+    if not endpoint and get_provider(normalize_provider(name)) is not None:
+        # A settings-only block under a BUILT-IN provider key (per-provider tuning like
+        # ``request_timeout_seconds`` / ``stale_timeout_seconds``) is metadata, not a deliberate
+        # endpoint: returning a ``source="user-config"`` definition here shadows the native
+        # identity, and model-switch then validates the target as ``custom:<name>`` — probing
+        # ``{base_url}/models`` on an OAuth backend that has no such listing (settings-only
+        # ``providers.openai-codex`` → spurious "Model switch failed", the model is never saved).
+        # Let the built-in rung resolve instead; an explicit ``api``/``url``/``base_url`` above
+        # (or a non-built-in key) still yields the user-config definition as before.
+        return None
     return _user_pdef(name, entry.get("name", "") or name,
-                      entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or "",
+                      endpoint,
                       entry.get("key_env") or entry.get("api_key_env") or "",
                       entry.get("transport", "openai_chat") or "openai_chat")
 
